@@ -1,0 +1,425 @@
+---
+title: "Marketing Campaign Data Example"
+author:
+  - Aleksandr Tsybakin^[York University, Mathematics and Statistics, tsybakin@yorku.ca]   
+  - Vadim Tyuryaev^[York University, Mathematics and Statistics, vadimtyu@yorku.ca]
+  - Jane Heffernan^[York University, Mathematics and Statistics,  jmheffer@yorku.ca]
+  - Hanna Jankowski^[York University, Mathematics and Statistics, hkj@yorku.ca]
+  - Kevin McGregor^[York University, Mathematics and Statistics, kevinmcg@yorku.ca]
+output: 
+  rmarkdown::html_vignette: 
+    df_print: kable
+bibliography: "./utils/ref.bib"
+link-citations: true
+vignette: >
+  %\VignetteIndexEntry{OddsRatioVisualizer}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+## Initial Setup 
+
+Import packages.
+
+```{r}
+suppressMessages(library(ggplot2))
+suppressMessages(library(visdat))
+suppressMessages(library(forcats))
+suppressMessages(library(corrplot))
+suppressMessages(library(ggpubr))
+suppressWarnings(library(gridExtra))
+suppressMessages(library(tibble))
+suppressMessages(library(dplyr))
+suppressMessages(library(naniar))
+suppressMessages(library(devtools))
+suppressMessages(library(glmnet))
+suppressMessages(library(selectiveInference))
+```
+
+Install and import [RegrCoeffsExplorer](https://github.com/vadimtyuryaev/RegrCoeffsExplorer/tree/main) package [@regrcoeffsexplorer].
+
+```{r}
+devtools::install_github("vadimtyuryaev/RegrCoeffsExplorer",
+                         ref="main",
+                         build_vignettes=TRUE)
+
+suppressMessages(library(RegrCoeffsExplorer))
+```
+
+We implemented several helper functions that will be re-used throughout examples under this tutorial.
+
+```{r}
+source("./utils/utils.R")
+```
+
+
+## Introduction
+
+In this section we will explore the Customer Personality Analysis dataset. This dataset was created by the *IFood* Company which is a delivery app in Brazil. This dataset was composed to analyze behavior of Company's customers to maximize profit of marketing campaigns. The dataset contains information about 2240 customers that was pulled from Company's Customer Relationship Management (CRM) systems. It's attributes are grouped in the following manner:
+
+1. *People* - customer general information such as Birth Year, Education, Income, etc.
+2. *Products* - data about customers' purchases such as amount spent on Fruits, Meat, etc. 
+3. *Promotions* - data that indicates if a customer accepted any of the previous offers under previous campaigns.
+4. *Places* - information about source of customers' purchases e.g. website, store and catalog.
+
+The goal for this research exercise is to analyze the factors that drive Company's customers to accept the offer under the latest campaign. We will perform Exploratory Data Analysis [@tukey1977exploratory] first and then fit a GLMNET model to understand the factors that affect customers' decisions. 
+
+More details can be found in [Dataset Data Card on Kaggle platform](https://www.kaggle.com/datasets/imakash3011/customer-personality-analysis) and [github page](https://github.com/nailson/ifood-data-business-analyst-test/) where the dataset was published.
+
+```{r}
+# Read data
+df_mp = read.csv("./data/marketing_campaign/marketing_campaign.csv", sep="\t")
+df_mp = as_tibble(df_mp)
+df_mp = df_mp%>%mutate_if(is.character, as.factor)
+dim(df_mp)
+```
+
+
+## Exploratory Data Analysis
+
+### Missing Values
+
+Let's take a closer look at the data. We will start with exploring missing values in the dataset.
+
+```{r, fig.width=7}
+# Plot missing values matrix 
+vis_miss(df_mp)
+```
+
+The matrix above shows that some `Income` records are missing. We can remove them as they cover less than 0.1% from the entire set of records.
+
+```{r}
+# remove NA values
+df_mp = na.omit(df_mp)
+```
+
+Now we can take a look at the distributions of categorical and numerical variables. However, we will remove `ID`, `Z_CostContact` and `Z_Revenue` variables from the dataset. This is because we do not need the first one in our further analysis (unique identifier), and there is no description on the Kaggle platform for the other two variables.
+
+```{r}
+# Remove 'ID', 'Z_CostContact' and 'Z_Revenue' columns from dataset
+# No descriptions for Z-columns
+df_mp = subset(df_mp, select=-c(ID, Z_CostContact, Z_Revenue))
+```
+
+
+### Categorical Variables
+
+Let's look at distributions of categorical variables.
+
+```{r, fig.height=4, fig.width=8}
+# Select categorical variables
+factor_vars = df_mp %>%
+  select_if(is.factor)
+
+# Plot barplots for factor variables
+plot_figures(factor_vars, ncol=3, plot_type="bar")
+```
+
+First let's analyze categorical variables. From the plots above we can see several things:
+
+1. Working with dates such as `Dt_Customer` variable is challenging. For this reason, we will calculate the number of years the customer is enrolled in Company's system.
+2. `Kidhome`, `Teenhome` and `Response` should be categorical variables as they consists of integer values only and represent groupings of customers  under certain conditions (e.g. number of kids), we will transform them to factors variables.
+3. Also, `Kidhome`, `Teenhome`, `Marital_Status` and `Education` variables are imbalanced, we will re-balance the variables into two groups - majority group vs others groups combined together.
+
+
+```{r, fig.height=6, fig.width=8}
+# Take a year from the enrollment date
+df_mp$Dt_Customer = as.numeric(format(as.Date(df_mp$Dt_Customer, format="%d-%m-%Y"),"%Y"))
+
+# Convert numeric variables into factors variables
+df_mp$Kidhome = as.factor(df_mp$Kidhome)
+df_mp$Teenhome = as.factor(df_mp$Teenhome)
+df_mp$Response = as.factor(df_mp$Response)
+
+
+# Collapse factors 
+df_mp[["Kidhome"]] = fct_collapse(df_mp[["Kidhome"]], "Has Kid"=c(1, 2), 
+                                  "No Kid"=c(0))
+df_mp[["Teenhome"]] = fct_collapse(df_mp[["Teenhome"]], "Has Teen"=c(1, 2), 
+                                   "No Teen"=c(0))
+df_mp[["Marital_Status"]] = fct_collapse(df_mp[["Marital_Status"]], 
+                                         "Single"=c("Absurd", "Alone", "Divorced",
+                                                    "Single", "Widow", "YOLO"), 
+                                         "Not Alone"=c("Married", "Together"))
+df_mp[["Education"]] = fct_collapse(df_mp[["Education"]], 
+                                         "School"=c("Basic", "Graduation"), 
+                                         "Post-Secondary"=c("2n Cycle", "Master",
+                                                            "PhD"))
+
+# Select categorical variables
+factor_vars = df_mp %>%
+  select_if(is.factor)
+
+# Plot barplots for factor variables
+plot_figures(factor_vars, ncol=3, plot_type="bar")
+```
+
+Now the categorical variables are more even. Let's analyze continuous variables and prepare them for modelling. 
+
+
+### Continuous Variables
+
+```{r, fig.height=22, fig.width=10}
+# Select continuous variables
+continuous_vars = df_mp %>%
+  select_if(is.numeric)
+
+# Plot histograms for numerical variables
+plot_figures(continuous_vars, ncol=3, plot_type="hist")
+```
+
+From the histograms above, we can make two initial observations:
+
+1. `Complain` variable is highly imbalanced and skewed towards *No complain*. We will remove it from our further analysis.
+
+2. All *Promotion* variables are also highly unbalanced towards 0 which indicates that most of Company's customers do not tend to accept previous offers. We will combine them into one binary variable `AcceptedCmp` that will indicate if a customer accepted at least one of these offers.
+
+```{r}
+# Remove 'Complain' as it is highly imbalanced
+df_mp = subset(df_mp, select=-c(Complain))
+
+# Convert variables about previous campaigns into one variable that
+# indicates if a client has ever participated in at least one campaign
+df_mp$AcceptedCmp = df_mp$AcceptedCmp1 + df_mp$AcceptedCmp2 + df_mp$AcceptedCmp3 + df_mp$AcceptedCmp4 + df_mp$AcceptedCmp5
+df_mp$AcceptedCmp = as.factor(df_mp$AcceptedCmp)
+df_mp[["AcceptedCmp"]] = fct_collapse(df_mp[["AcceptedCmp"]], 
+                                      "Accepted an Offer"=c(1, 2, 3, 4), 
+                                      "No offers accepted"=c(0))
+
+# Remove previous campaigns variables
+df_mp = subset(df_mp, select=-c(AcceptedCmp1, 
+                                AcceptedCmp2, 
+                                AcceptedCmp3, 
+                                AcceptedCmp4, 
+                                AcceptedCmp5))
+```
+
+Now let's make more use of `Age` and `Dt_Customer` variables which stand for year of customer's birth and year of customer's enrollment into the system respectively. We will define a reference 'current' year and transform these variables to lengths relative to periods since the defined year. We will set *2020* as the current year because this was the year when the dataset was released on github.
+
+In addition to this, from the histogram plots above we can see that all *Products* variables are skewed and have heavy right tails. We will combine them into one variable `Total_Expenses` that indicates total expenses on all types of products.
+
+```{r, fig.height=12, fig.width=11}
+# Set a current year (approximate year when the data was released,
+# ref: https://github.com/nailson/ifood-data-business-analyst-test/
+CUR_YEAR = 2020
+
+# Calculate customers' age 
+df_mp$Age = CUR_YEAR - df_mp$Year_Birth
+
+# Calculate number of years since customers' enrollment 
+df_mp$Enrollment_Length = CUR_YEAR - df_mp$Dt_Customer
+
+# Count all expenses of of several sectional expenses variables
+df_mp$Total_Expenses = df_mp$MntWines + df_mp$MntFruits + df_mp$MntMeatProducts + df_mp$MntFishProducts + df_mp$MntSweetProducts + df_mp$MntGoldProds
+
+# Remove not needed columns
+df_mp = subset(df_mp, select=-c(Year_Birth, Dt_Customer, MntWines, MntFruits, 
+                                MntMeatProducts, MntFishProducts, 
+                                MntSweetProducts, MntGoldProds))
+
+# Select continuous variables
+continuous_vars = df_mp %>%
+  select_if(is.numeric)
+
+# Plot histograms for numerical variables
+plot_figures(continuous_vars, ncol=3, plot_type="hist")
+```
+
+We can see that `Enrollment_Length` have only three integer values which split customers into three groups. For this reason, we will convert this variable to factor type.
+
+```{r}
+# Convert to factor as it has only 3 possible integer values
+df_mp$Enrollment_Length = as.factor(df_mp$Enrollment_Length)
+```
+
+Also, some numerical variables have outliers in their distributions (e.g. `Income`, `NumWebPurchases`, etc.). We will remove them using *1.5 Interquartile Range (IQR) rule* to avoid any impact from outliers on performance of our model. The IQR rule is implemented in the *get_bounds_iqr()* function. The *count_outliers_iqr()* function counts number of outliers per variable.
+
+```{r}
+# Get Upper and Lower limit according to the 1.5 IQR rule
+get_bounds_iqr = function(data, num_var) {  
+  Q1 = quantile(data[[num_var]], probs=.25, na.rm=FALSE)[["25%"]]
+  Q3 = quantile(data[[num_var]], probs=.75, na.rm=FALSE)[["75%"]]
+  IQR = Q3 - Q1
+  
+  Lower = Q1 - 1.5 * IQR
+  Upper = Q3 + 1.5 * IQR 
+  
+  return(c(Lower, Upper))
+}
+
+# Get number of outliers according to the 1.5 IQR rule
+count_outliers_iqr = function(data, num_var) {  
+  bounds = get_bounds_iqr(data, num_var)
+  return(nrow(data[data[[num_var]] < bounds[1] | data[[num_var]] > bounds[2], ]))
+}
+```
+
+Let's see how many outliers per variable we have in the dataset.
+
+```{r}
+# Select continuous variables
+continuous_vars = df_mp %>%
+  select_if(is.numeric)
+
+# Count number of total outliers
+total_num_outliers = 0
+
+# Iterate through numerical columns and get number of outliers according to the 1.5 IQR rule
+# for each column
+for (col in colnames(continuous_vars)) {
+  print(col)
+  cur_num_outliers = count_outliers_iqr(df_mp, col)
+  print(cur_num_outliers)
+  total_num_outliers = total_num_outliers + cur_num_outliers
+}
+
+# Display total number of outliers
+total_num_outliers
+```
+
+We can see that `NumDealsPurchases` has the most number of outliers. In total we have 132 outliers in all numerical variables. Please note: these are not unique counts, and outliers records might overlap for several variables.
+
+Now let's remove outliers from the dataset.
+
+```{r}
+# Get number of rows before removal of outliers
+nrow(df_mp)
+
+# Remove outliers identified above
+var_bounds = list()
+
+# Store all bound before removal as sequential removal changes variables distributions:
+# distributions for other variables got affected while removing rows from dataframe 
+# with one outlier variable
+for (col in colnames(continuous_vars)) {
+  var_bounds[[col]] = get_bounds_iqr(df_mp, col)
+}
+
+for (col in names(var_bounds)) {
+  df_mp = df_mp[df_mp[[col]] >= var_bounds[[col]][1] & df_mp[[col]] <= var_bounds[[col]][2], ]
+}
+# Get number of rows after removal, it does not match with the total number of outliers
+# as that number counts non-unique rows in the dataset (e.g. one row contains two outliers)
+nrow(df_mp)
+```
+
+In total we removed 121 records (2216 rows before deleting and 2095 rows after). Let's check correlations in the dataset among continuous variables.
+
+```{r, fig.height=6, fig.width=6}
+# Get the correlation matrix
+cor_matrix = cor(continuous_vars)
+
+# Plot the correlation matrix
+corrplot(cor_matrix, method = "number", number.cex=0.7)
+```
+
+We will remove `Total_Expenses` variable as it has correlations with several other numerical variables in the dataset.
+
+```{r}
+# Remove 'Total_Expenses' as it correlates with multiple other variables
+df_mp = subset(df_mp, select=-c(Total_Expenses))
+```
+
+
+## Modelling
+
+Now we are ready to fit a model on the data to explore factors that influence Customers' in their decision on accepting marketing campaign offers. We will build a *GLMNET* model to fit a LASSO regression ($\alpha = 1$) with *binomial* family.
+
+We will build a *model.matrix* object based on the dataset, select the best $\lambda$ parameter based on Cross-Validation and build a *GLMNET* model with the selected $\lambda$ parameter. We will select $\lambda$ that gives a minimum Binomial Deviance based on Cross Validation.
+
+```{r}
+# Get Lasso model 
+y_lasso = df_mp$Response
+x_lasso = model.matrix(as.formula(paste("~",
+        paste(colnames(subset(df_mp, select=-c(Response))), 
+              collapse="+"),
+        sep="")), 
+        data=df_mp)
+x_lasso = x_lasso[, -1]
+
+ndim_lasso = dim(x_lasso)[1]
+
+# Select the best lambda 
+cv_model_lasso = cv.glmnet(x_lasso, y_lasso, family="binomial", alpha=1)
+best_lambda_lasso = cv_model_lasso$lambda.min  
+plot(cv_model_lasso) 
+```
+
+
+
+```{r}
+# Get a model with the best lambda
+best_model_lasso = glmnet(x_lasso, y_lasso, family="binomial", alpha=1, 
+                          lambda=best_lambda_lasso)
+summary(best_model_lasso)
+```
+
+Here we can see that model fitted with the best $\lambda$ retains all the variables. Let's take a look at the model's coefficients values. 
+
+```{r}
+coef(best_model_lasso)
+```
+
+Let's use the *vis_reg()* function to see what the effect on the target variable would be from an increment of the difference between the median and minimum for each variable. 
+
+More details on *vis_reg()* function can be found in our [vignette](https://vadimtyuryaev.github.io/RegrCoeffsExplorer/articles/BetaVisualizer.html):
+
+```{r}
+# load OddsRatioVisualizer vignette
+vignette("BetaVisualizer", 
+         package="RegrCoeffsExplorer")
+```
+
+```{r, fig.height=6,fig.width=10}
+# Plot Odds Ratio for one Unit Difference vs. Odds Ratio for median and minimum difference
+# Note: we define categorical variables in 'glmnet_fct_var' parameter
+grid.arrange(vis_reg(best_model_lasso, palette=c("deepskyblue","darkorange"),
+                    eff_size_diff=c(1, 3),
+                    glmnet_fct_var=c("AcceptedCmpAccepted an Offer", 
+                                    "EducationSchool", #"KidhomeHas Kid",
+                                    "Marital_StatusNot Alone", "TeenhomeHas Teen",
+                                    "Enrollment_Length7", "Enrollment_Length8"))$"SidebySide")
+```
+
+The observed influence of `Income` on the target variable undergoes a notable shift when examining the disparity between the first and third quartiles (Effective plot), as opposed to assessing the impact of a one-unit change (Unit plot). Specifically, a one-unit alteration in income does not significantly alter the customer income group; however, a broader scale comparison reveals distinctions across various income groups. Conversely, we observe a contrasting effect for the `Recency` variable.
+
+Now let's take at the Odds Ratio plots for numerical variables. We will customize plots similarly to the previous example with the Heart Attack Data (please see the [vignette](https://vadimtyuryaev.github.io/RegrCoeffsExplorer/articles/OddsRatioVisualizer.html)) for more details:
+
+```{r}
+# load OddsRatioVisualizer vignette
+vignette("OddsRatioVisualizer", 
+         package="RegrCoeffsExplorer")
+```
+
+```{r, fig.height=12, fig.width=10, warning=F}
+# Select continuous variables
+continuous_vars = df_mp %>%
+  select_if(is.numeric)
+
+# Create a list to store all plots
+plot_list = list()
+
+# Store side by side graphs for all numeric variables
+for (name in colnames(continuous_vars)) {
+  # Customize graph through layers and color parameter
+  or_plots = plot_OR(best_model_lasso, df_mp, var_name=name, 
+                     color_filling=c("#CC6666", "#9999CC","#66CC99","#FF6600"))
+  
+  # Plot both graphs together
+  plot_list[[name]] = customized_plots(or_plots)
+}
+
+# Plot all graphs in one matrix
+plot_grob = arrangeGrob(grobs=plot_list, ncol=2)
+grid.arrange(plot_grob)
+```
+
+Similarly to the Heart Attack example, we can make two counter-intuitive observations: 
+
+1. *Chance of acceptance of next campaign decreases as number of store purchases increases*. However, we can see the opposite tendency in number of web visits and number of web purchases. One possible explanation could be if the campaign is offered online and customers that shop offline are not aware of it. The Company might need to advertise their offers in-store more.
+
+2. *Age does not affect the chance of acceptance of next campaign*. From the coefficient values above we can see that Lasso regression zeros this `Age` variable out. One direction that the Company might consider is making targeting certain age groups under their marketing campaigns to make more use of this characteristic. 
+
+
+## References
+

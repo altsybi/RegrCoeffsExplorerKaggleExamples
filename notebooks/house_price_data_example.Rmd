@@ -1,0 +1,363 @@
+---
+title: "House Price Data Example"
+author:
+  - Aleksandr Tsybakin^[York University, Mathematics and Statistics, tsybakin@yorku.ca]   
+  - Vadim Tyuryaev^[York University, Mathematics and Statistics, vadimtyu@yorku.ca]
+  - Jane Heffernan^[York University, Mathematics and Statistics,  jmheffer@yorku.ca]
+  - Hanna Jankowski^[York University, Mathematics and Statistics, hkj@yorku.ca]
+  - Kevin McGregor^[York University, Mathematics and Statistics, kevinmcg@yorku.ca]
+output: 
+  rmarkdown::html_vignette: 
+    df_print: kable
+bibliography: "./utils/ref.bib"
+link-citations: true
+vignette: >
+  %\VignetteIndexEntry{OddsRatioVisualizer}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+## Initial Setup 
+
+Import packages.
+
+```{r}
+suppressMessages(library(ggplot2))
+suppressMessages(library(visdat))
+suppressMessages(library(forcats))
+suppressMessages(library(corrplot))
+suppressMessages(library(ggpubr))
+suppressWarnings(library(gridExtra))
+suppressMessages(library(tibble))
+suppressMessages(library(dplyr))
+suppressMessages(library(naniar))
+suppressMessages(library(devtools))
+```
+
+Install and import [RegrCoeffsExplorer](https://github.com/vadimtyuryaev/RegrCoeffsExplorer/tree/main) package [@regrcoeffsexplorer].
+
+```{r}
+devtools::install_github("vadimtyuryaev/RegrCoeffsExplorer",
+                         ref="main",
+                         build_vignettes=TRUE)
+
+suppressMessages(library(RegrCoeffsExplorer))
+```
+
+We implemented several helper functions that will be re-used throughout examples under this tutorial.
+
+```{r}
+source("./utils/utils.R")
+```
+
+
+## Introduction
+
+In this example, we will cover [House Prices Dataset](https://www.kaggle.com/datasets/lespin/house-prices-dataset?select=data_description.txt) from the Kaggle platform. The main goal of the study is to predict a property's sale price in dollars based on 80 aspects including location information (e.g. `Neighborhood`, `Street`, etc.), property information (`LotArea`, `HouseStyle`, etc.), sale information (`YrSold`, `SaleType`, etc.) and other parameters. In the end of this notebook, we will analyse what factors influence the property's sale price the most based on a Linear Model (LM).
+
+Let us start with loading the dataset for Exploratory Data Analysis [@tukey1977exploratory]. 
+
+```{r}
+df_hprices = read.csv("./data/house_prices/house_prices.csv")
+df_hprices = as_tibble(df_hprices)
+df_hprices = df_hprices %>% mutate_if(is.character, as.factor)
+
+# Remove Id column
+df_hprices = df_hprices%>%dplyr::select(-c(Id))
+
+dim(df_hprices)
+```
+
+The initial dataset has information about 1460 properties.
+
+## Exploratory Data Analysis 
+
+### Missing Values
+
+First things first - let's take a look at missing values in the dataset.
+
+```{r, fig.width=12}
+# Plot missing values matrix 
+vis_miss(df_hprices)
+
+# More detailed missing values analysis
+gg_miss_upset(df_hprices)
+```
+
+We will remove variables that have more than 5% of missing values (`Alley`, `FireplaceQu`, `PoolQC`, `Fence`, `MiscFeature` and `LotFrontage`). 
+
+```{r}
+# Delete columns with >5% missing
+df_hprices = subset(df_hprices, select=-c(Alley,
+                                          FireplaceQu, 
+                                          PoolQC,  
+                                          Fence, 
+                                          MiscFeature, 
+                                          LotFrontage))
+```
+
+Now let's take a closer look at the systematic missing values. Systematic missing values appear in data instances with a certain pattern in same fields [@Weinberg1992Conceptual]. They form a black stripes in missing values matrix below.
+
+```{r, fig.width=12}
+# Plot missing values matrix 
+vis_miss(df_hprices)
+
+# More detailed missing values analysis
+gg_miss_upset(df_hprices)
+```
+
+Systematic missing values should be removed as they cannot be imputed based on other columns. We will remove instances with systematic missing values based on the following sets of fields:
+
+1. `BsmtFinType1` and `BsmtExposure`.
+
+2. `MasVnrType` and `MasVnrArea`.
+
+3. `BsmtExposure`, `BsmtFinType2` and `Electrical`.
+
+4. `Garage`-related fields.
+
+```{r, fig.width=12}
+# Remove systematically missing values
+df_hprices = df_hprices%>%filter(!(is.na(BsmtFinType1)) & !(is.na(BsmtExposure)))
+df_hprices = df_hprices%>%filter(!(is.na(MasVnrType)) & !(is.na(MasVnrArea)))
+df_hprices = df_hprices%>%filter(!(is.na(BsmtExposure)) & !(is.na(BsmtFinType2)) & !(is.na(Electrical)))
+df_hprices = df_hprices%>%filter(!(is.na(GarageType)))
+vis_miss(df_hprices) 
+```
+
+As we can see from the missing matrix above, we do not have any missing values in the dataset.
+
+### Categorical Variables
+
+Let's take a look at the categorical variables in the dataset.
+
+```{r, fig.height=24, fig.width=12}
+# Select categorical variables
+factor_vars = df_hprices %>%
+  select_if(is.factor)
+
+# Plot barplots for factor variables
+plot_figures(factor_vars, ncol=4, plot_type="bar")
+```
+
+Most of the categorical variables are unbalanced. We will perform the following operations:
+
+1. Remove highly unbalanced variables (`Street`, `Utilities`, `Condition2`, `RoofMatl` and `Heating`).
+
+2. Re-balance some of these variables by combining several minor categories into one using the *rebalance_factors()* function defined in the utils file.
+
+3. Manually re-balance the remaining variables (`KitchenQual`, `BsmtFinType1`, `BsmtQual`, `Foundation` and `HouseStyle`).
+
+```{r, fig.height=24, fig.width=12}
+# Remove highly unbalanced factor variables 
+df_hprices=df_hprices%>%dplyr::select(-c(Street,
+                                         Utilities, 
+                                         Condition2, 
+                                         RoofMatl,
+                                         Heating))
+
+# Select categorical variables
+factor_vars = df_hprices %>%
+  select_if(is.factor)
+
+# Rebalance factor variables
+for (col in colnames(factor_vars)) {
+  df_hprices = rebalance_factors(df_hprices, col)
+}
+
+# Re-group unbalanced factor variables 
+df_hprices[["KitchenQual"]] = fct_collapse(df_hprices[["KitchenQual"]],
+                                            Other=c("Ex", "Fa"))
+
+df_hprices[["BsmtFinType1"]] = fct_collapse(df_hprices[["BsmtFinType1"]],
+                                             Other=c("ALQ", "BLQ", "LwQ", "Rec"))
+
+df_hprices[["BsmtQual"]] = fct_collapse(df_hprices[["BsmtQual"]],
+                                         Other=c("Ex", "Fa"))
+
+df_hprices[["Foundation"]] = fct_collapse(df_hprices[["Foundation"]],
+                                           Other=c("Stone", "Wood", "BrkTil"))
+
+df_hprices[["HouseStyle"]] = fct_collapse(df_hprices[["HouseStyle"]],
+                                           Other=c("1.5Fin", "1.5Unf",
+                                                     "2.5Fin", "2.5Unf",
+                                                     "SFoyer", "SLvl"))
+
+
+# Plot barplots for factor variables
+plot_figures(factor_vars, ncol=4, plot_type="bar") 
+```
+
+Also, `Neighborhood`, `Exterior1st` and `Exterior2nd` variables have too many categories which potentially complicates our analysis and plotting. For this reason, we will remove these variables from further analysis and modelling. 
+
+```{r}
+# Remove variables with too many categories
+df_hprices = df_hprices%>%dplyr::select(-c(Neighborhood,
+                                           Exterior1st,
+                                           Exterior2nd))
+
+# Check number of columns left
+ncol(df_hprices)
+```
+
+Let's select the categorical variables that highly statistically significant through Analysis of Variance (ANOVA) [@Seiler2019ANOVA].
+
+```{r}
+# Select categorical variables
+factor_vars = df_hprices %>%
+  select_if(is.factor)
+
+# Perform ANOVA for each factor variable with the sales prices variable
+anova_results = lapply(factor_vars, function(factor_var) {
+  aov_result = aov(SalePrice ~ factor_var, data=df_hprices)
+  return(summary(aov_result))
+})
+
+# Print the ANOVA results
+anova_results
+```
+
+Let's select variables that significant at 1% and remove all other columns (`LandContour`, `LotConfig`, `LandSlope`, `ExterCond`, `BsmtCond`, `BsmtFinType2`).
+
+```{r}
+# Select only significant at 1% and less, remove others
+df_hprices = df_hprices%>%dplyr::select(-c(LandContour,
+                                           LotConfig,
+                                           LandSlope,
+                                           ExterCond,
+                                           BsmtCond,
+                                           BsmtFinType2))                   
+```
+
+
+### Continuous Variables
+
+In this section, we will explore continuous variables and prepare them for modelling. 
+
+```{r, fig.height=24, fig.width=12}
+# Select continuous variables
+continuous_vars = df_hprices %>%
+  select_if(is.numeric)
+
+# Plot histograms for factor numerical variables
+plot_figures(continuous_vars, ncol=4, plot_type="hist") 
+```
+
+The dataset has 3 date variables coded as years (`YrSold`, `YearRemodAdd` and `YearBuilt`). Let us take a look at the `YrSold`. From the histogram above we can see that it’s distribution is close to uniform. Let's examine the `SalePrice` by year sold via the boxplot.
+
+```{r, fig.height=6, fig.width=6}
+# Plot SalePrice boxplots factorized by YrSold categories
+ggplot(df_hprices, aes(x=as.factor(YrSold), y=SalePrice, fill=YrSold)) +
+  geom_boxplot() + 
+  labs(title=paste("SalePrice factorized by YrSold"), x="YrSold")
+```
+
+As we can see from boxplots above, the distribution of `SalePrice` values is very similar among different `YrSold` years. For this reason, we will remove this variable from the dataset.
+
+```{r}
+# Remove variables with too many categories
+df_hprices = df_hprices%>%dplyr::select(-c(YrSold))
+```
+
+The same is not true for the other two variables. Therefore, we will convert year values from these variables into number of years since an event. To do this, we will fix a year when this dataset was released (2018) and call it the *Current Year*. Then, we will subtract the year values from these two variables from the Current Year. As the result, we will get number of years since remodeling (`YearsSinceRemod`) and number of years since the property was built (e.g. age of the property, `YearsSinceBuilt`).
+
+```{r}
+# Set a current year (approximate year when the data was released,
+# ref: https://www.kaggle.com/datasets/lespin/house-prices-dataset/data
+CUR_YEAR = 2018
+
+# Calculate number of years since remodel 
+df_hprices$YearsSinceRemod = CUR_YEAR - df_hprices$YearRemodAdd
+
+# Calculate number of years since the property was built 
+df_hprices$YearsSinceBuilt = CUR_YEAR - df_hprices$YearBuilt
+
+# Remove initial year variables
+df_hprices = df_hprices%>%dplyr::select(-c(YearRemodAdd,
+                                           YearBuilt))
+```
+
+Also, we will remove variables with have highly skewed distribution based on histograms above (`LotArea`, `BsmtFinSF2`, `LowQualFinSF`, `EnclosedPorch`, `X3SsnPorch`, `ScreenPorch`, `PoolArea`, `MiscVal`).  
+
+```{r}
+# Remove variables with highly skewed distribution
+df_hprices = df_hprices%>%dplyr::select(-c(LotArea, 
+                                           BsmtFinSF2,
+                                           LowQualFinSF,
+                                           EnclosedPorch,
+                                           X3SsnPorch,
+                                           ScreenPorch,
+                                           PoolArea,
+                                           MiscVal))
+```
+
+Let's look at correlations between remaining continuous variables. We will zero out correlations below $0.65$ for better visual representations.
+
+```{r, fig.height=7, fig.width=7}
+# Calculate the correlation matrix
+cor_matrix = cor(continuous_vars)
+cor_matrix[abs(cor_matrix) < 0.65] = 0
+
+# Plot the filtered correlation matrix using corrplot
+corrplot(cor_matrix, method="color")
+```
+
+We will eliminate variables that show high correlation (with absolute values over $0.65$) with other variables. Among those marked for removal, we will retain those with the strongest correlation to the target variable (`SalePrice`).
+
+```{r}
+ # Remove correlated select the one that have higher corr with SP
+df_hprices = df_hprices%>%dplyr::select(-c(GarageYrBlt,
+                                           TotRmsAbvGrd,
+                                           GarageCars,
+                                           TotalBsmtSF,
+                                           X2ndFlrSF))
+```
+
+
+## Modelling
+
+Now let's fit a Linear Model to the dataset and analyze the effect of different features of properties on the Sale Price.
+
+```{r}
+# Fit the Linear Model on the dataset
+independent_vars = colnames(df_hprices)[!colnames(df_hprices) %in% c("SalePrice")]
+formula_str = paste("SalePrice ~", paste(independent_vars, collapse=" + "))
+lm_model = lm(as.formula(formula_str), data=df_hprices)
+summary(lm_model)
+```
+
+From the p-values above we can see that there are several variables of high significance while analyzing one-unit change effect on the target variable. Let's take a look at the effect of the difference between Q3 and Q1 (default) in each variable on the target variable. We will use the *vis_reg()* function to visualize both approaches.
+
+More details on *vis_reg()* function can be found in our [vignette](https://vadimtyuryaev.github.io/RegrCoeffsExplorer/articles/BetaVisualizer.html):
+
+```{r}
+# load OddsRatioVisualizer vignette
+vignette("BetaVisualizer", 
+         package="RegrCoeffsExplorer")
+```
+
+```{r, fig.height=8,fig.width=12}
+# Plot Odds Ratio for Unit Difference vs. Odds Ratio for difference between Q3 and Q1
+grid.arrange(vis_reg(lm_model, palette=c("palegreen4","tomato1"))$"SidebySide")
+```
+
+The left barplot shows one-unit difference effect (`Unit plot`), while the right one shows Q3-Q1 difference effect (`Effective`). We can see that variables' effect is difference on these graphs. In this Kaggle dataset, when considering the empirical distribution, the largest estimated coefficient corresponds to `GrLivArea`, indicating that the feature with the most significant influence on Sale Price is the square footage of above-grade (ground) living area. 
+
+```{r}
+# Calculate all possible differences
+all_diffs = combn(df_hprices$GrLivArea, 2, function(x) abs(x[1] - x[2]))
+
+# Count differences that are exactly 1 units
+num_diffs_exactly_one = sum(abs(all_diffs) == 1)
+sprintf("Number of differences of exactly 1 unit: %s", num_diffs_exactly_one)
+
+# Count the proportion of differences that more or equal to 2 units
+num_diffs_2_or_more = sum(num_diffs_exactly_one) / sum(abs(all_diffs)) * 100
+sprintf("Proportion of differences of one unit: %s%%", num_diffs_2_or_more)
+```
+
+Only a fraction of the variations observed in the variable `GrLivArea` amount to a singular unit. Consequently, when interpreting standard regression outputs on a per-unit basis, we are essentially discussing differences that represent only a small fraction of the overall data. 
+Thus, the analysis of standard regression outputs on a per-unit basis implicitly addresses differences that may not be significant in the actual dataset. A more pragmatic approach involves utilizing a tangible observable difference, such as the interquartile range (IQR), to estimate regression coefficients, particularly when considering the empirical distribution of data. 
+
+
+## References

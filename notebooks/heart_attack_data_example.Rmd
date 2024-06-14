@@ -1,0 +1,281 @@
+---
+title: "Heart Attack Data Example"
+author:
+  - Aleksandr Tsybakin^[York University, Mathematics and Statistics, tsybakin@yorku.ca]   
+  - Vadim Tyuryaev^[York University, Mathematics and Statistics, vadimtyu@yorku.ca]
+  - Jane Heffernan^[York University, Mathematics and Statistics,  jmheffer@yorku.ca]
+  - Hanna Jankowski^[York University, Mathematics and Statistics, hkj@yorku.ca]
+  - Kevin McGregor^[York University, Mathematics and Statistics, kevinmcg@yorku.ca]
+output: 
+  rmarkdown::html_vignette: 
+    df_print: kable
+bibliography: "./utils/ref.bib"
+link-citations: true
+vignette: >
+  %\VignetteIndexEntry{OddsRatioVisualizer}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+## Initial Setup 
+
+Import packages.
+
+```{r}
+suppressMessages(library(ggplot2))
+suppressMessages(library(visdat))
+suppressMessages(library(forcats))
+suppressMessages(library(corrplot))
+suppressMessages(library(ggpubr))
+suppressWarnings(library(gridExtra))
+suppressMessages(library(tibble))
+suppressMessages(library(dplyr))
+suppressMessages(library(naniar))
+suppressMessages(library(devtools))
+```
+
+Install and import [RegrCoeffsExplorer](https://github.com/vadimtyuryaev/RegrCoeffsExplorer/tree/main) package [@regrcoeffsexplorer].
+
+```{r}
+devtools::install_github("vadimtyuryaev/RegrCoeffsExplorer",
+                         ref="main",
+                         build_vignettes=TRUE)
+
+suppressMessages(library(RegrCoeffsExplorer))
+```
+
+We implemented several helper functions that will be re-used throughout examples under this tutorial.
+
+```{r}
+source("./utils/utils.R")
+```
+
+
+## Introduction
+
+In this notebook we will explore [Heart Attack Data](https://www.kaggle.com/datasets/rashikrahmanpritom/heart-attack-analysis-prediction-dataset) from the Kaggle platform. This dataset contains 13 physical characteristics of 303 patients and an output column which indicates higher/lower chance of heart attack. The purpose of this study is to explore factors that drive a higher chance of heart attack.
+
+First, we will prepare the dataset for Exploratory Data Analysis [@tukey1977exploratory] by converting non-numerical columns to factors and renaming factor levels.
+
+```{r}
+# Read data
+df_heart = read.csv("./data/heart_attack/heart_attack.csv")
+df_heart = as_tibble(df_heart)
+df_heart = df_heart%>%mutate_if(is.character, as.factor)
+
+# Change the names of columns to make them more readable
+colnames(df_heart) = c("age", "sex", "chest_pain_type", "resting_blood_presure",
+                       "cholesterol", "fasting_blood_sugar", "rest_ecg", "max_heart_rate",
+                       "exercise_induced_angina", "old_peak", "slope", "major_vessels_num",
+                       "thal_rate", "output")
+
+# Define factor variables
+factor_vars = c("sex", "chest_pain_type", "fasting_blood_sugar", "rest_ecg", 
+                "exercise_induced_angina", "slope", "major_vessels_num", 
+                "thal_rate", "output")
+df_heart[factor_vars] = lapply(df_heart[factor_vars], as.factor)
+
+# Rename factors based on the dataset card, ref:
+# https://www.kaggle.com/datasets/rashikrahmanpritom/heart-attack-analysis-prediction-dataset
+levels(df_heart$chest_pain_type) = list("Typical Angina"="0", "Atypical Angina"="1", 
+                                        "Non-Anginal Pain"="2", "Asymptomatic"="3")
+levels(df_heart$fasting_blood_sugar) = list("<= 120 mg/dl"="0", "> 120 mg/dl"="1")
+levels(df_heart$rest_ecg) = list("Normal"="0", " ST-T Wave Abnormality"="1", 
+                                 "Left Ventricular Hypertrophy"="2")
+levels(df_heart$exercise_induced_angina) = list("EIA"="0", 
+                                                "Not EIA"="1")
+levels(df_heart$major_vessels_num) = list("Zero Vessels"="0", 
+                                          "One Vessel"="1", 
+                                          "Two Vessels"="2",
+                                          "Three Vessels"="3", 
+                                          "Four Vessels"="4")
+levels(df_heart$output) = list("Less Chance"="0", 
+                               "More Chance"="1")
+
+dim(df_heart)
+```
+
+
+## Exploratory Data Analysis 
+
+### Missing Values
+
+Let's check if the dataset has any missing values. 
+
+```{r, fig.width=7}
+# Plot missing values matrix 
+vis_miss(df_heart)
+```
+
+From the plot above we can see that the dataset does not have any missing values. Now we can move further and explore variables' distributions by plotting histograms for numerical variables and bar plots for factor variables.
+
+### Categorical Variables
+
+```{r, fig.height=8, fig.width=10}
+# Select categorical variables
+factor_vars = df_heart %>%
+  select_if(is.factor)
+
+# Plot barplots for factor variables
+plot_figures(factor_vars, ncol=3, plot_type="bar")
+```
+
+Almost all factor variables are unbalanced including the target variable where the distribution is skewed towards patients with more chance of heart attack. Therefore, we will do the following:
+
+1. Remove the `fasting_blood_sugar` variable because it is highly skewed towards *<= 120 mg/dl* factor.
+
+2. Re-balance `rest_ecg`, `thal_rate`, `chest_pain_type`, `slope` and `major_vessels_num` variables into two groups (majority group and others groups combined together).
+
+```{r}
+# Remove 'fasting_blood_sugar' as it is highly imbalanced
+df_heart = subset(df_heart, select=-c(fasting_blood_sugar))
+
+# Re-group unbalanced factor variables 
+df_heart = rebalance_factors(df_heart, "rest_ecg")
+df_heart = rebalance_factors(df_heart, "thal_rate")
+
+df_heart[["chest_pain_type"]] = fct_collapse(df_heart[["chest_pain_type"]], 
+                                             Other = c("Atypical Angina", 
+                                                       "Non-Anginal Pain", 
+                                                       "Asymptomatic"))
+df_heart[["slope"]] = fct_collapse(df_heart[["slope"]], Other = c(0, 1))
+df_heart[["major_vessels_num"]] = fct_collapse(df_heart[["major_vessels_num"]], 
+                                               ">=1 Vessels" = c("One Vessel", 
+                                                                 "Two Vessels",
+                                                                 "Three Vessels", 
+                                                                 "Four Vessels"))
+```
+
+
+### Continuous Variables
+
+```{r, fig.height=6, fig.width=8}
+# Select continuous variables
+continuous_vars = df_heart %>%
+  select_if(is.numeric)
+
+# Plot barplots for factor variables
+plot_figures(continuous_vars, ncol=3, plot_type="hist")
+```
+
+Several numerical variables have skewed distributions and heavy right tails (`cholesterol`, `old_peak` and `resting_blood_presure`). Based on the above plots we will do the following:
+
+1. Remove `old_peak` variable because it is not very clear what this variable means from the description of the dataset.
+
+2. Remove outliers from `resting_blood_presure` (< 180) and `cholesterol` variables (< 450). 
+
+```{r}
+# Remove 'old_peak' as it is not clear what it means
+df_heart = subset(df_heart, select=-c(old_peak))
+
+# Remove outliers based on histograms above
+df_heart = df_heart[df_heart$resting_blood_presure < 180 & df_heart$cholesterol < 450, ]
+```
+
+Now let's take a look at correlations between numerical variables.
+
+```{r, fig.height=6, fig.width=6}
+# Get correlation matrix
+cor_matrix = cor(continuous_vars)
+
+# Plot the correlation matrix
+corrplot(cor_matrix, method="number")
+```
+
+None of the variables are highly correlated. Next we will fit a GLM model with the binary family to predict a higher (1 class) or lower (0 class) chance of getting a heart attack. Also, we will analyze the effect of each characteristic on the output variable.
+
+
+## Modelling
+
+Let's fit a *GLM* model with *binomial* family on the Heart Attack dataset to understand what factors drive a higher risk of a heart attack.
+
+```{r, fig.height=6, fig.width=8}
+# Fit the GLM model
+independent_vars = colnames(df_heart)[!colnames(df_heart) %in% c("output")]
+formula_str = paste("output ~", paste(independent_vars, collapse=" + "))
+
+glm_object=glm(as.formula(formula_str),
+               family=binomial(link="logit"),
+               data=df_heart)
+
+summary(glm_object)
+```
+
+In the model estimation, attributes including `sex`, `chest_pain_type`, `slope`, `major_vessels_num`, and `thal_rate` are highly statistically significant. Within the traditional interpretative framework, `max_heart_rate` is construed to exert the least magnitude of positive influence on the dependent variable. However, this interpretation overlooks the empirical distributional characteristics of the dataset. To achieve a more comprehensive view, we will utilize the *vis_reg()* function to visually represent the repercussions on the dependent variable arising from an increment equivalent to the disparity between the median and minimum values for each respective attribute.
+
+More details on *vis_reg()* function can be found in our [vignette](https://vadimtyuryaev.github.io/RegrCoeffsExplorer/articles/BetaVisualizer.html):
+
+```{r}
+# load BetaVisualizer vignette
+vignette("BetaVisualizer", 
+         package="RegrCoeffsExplorer")
+```
+
+```{r, fig.height=4, fig.width=10}
+# Plot Odds Ratio for Unit Difference vs. Odds Ratio between median and minimum (eff_size_diff=c(1, 3))
+# Note: we define categorical variables in 'glmnet_fct_var' parameter
+grid.arrange(vis_reg(glm_object, 
+                     CI=TRUE,
+                     eff_size_diff=c(1, 3),
+                     palette=c("navyblue","coral"),
+                     glmnet_fct_var=c("sex1", "chest_pain_typeOther",
+                                     "rest_ecg ST-T Wave Abnormality",
+                                     "exercise_induced_anginaNot EIA",
+                                     "slope2", "major_vessels_num>=1 Vessels",
+                                     "thal_rate2"))$"SidebySide")
+```
+
+The OR plots generated above indicate a substantial alteration in the significance of `max_heart_rate` concerning the target variable when incorporating the empirical data distribution. Specifically, the analysis shifts from examining the impact of a one-unit change (`Unit plot`) to assessing the effects of the difference between the median and minimum (`Effective plot`) on the estimated OR.
+
+Let's take a look at the Odds Ratio plots. We will customized the graphs with the *customized_plots()* function as detailed in our [vignette](https://vadimtyuryaev.github.io/RegrCoeffsExplorer/articles/OddsRatioVisualizer.html):
+
+```{r}
+# load OddsRatioVisualizer vignette
+vignette("OddsRatioVisualizer", 
+         package="RegrCoeffsExplorer")
+```
+
+Let's plot the Odds Ratio plots.
+
+```{r, fig.height=8, fig.width=10}
+# Select continuous variables
+continuous_vars = df_heart %>%
+  select_if(is.numeric)
+
+# Create a list to store all plots
+plot_list = list()
+
+# Store side by side graphs for all numeric variables
+for (name in colnames(continuous_vars)) {
+  # Customize graph through layers and color parameter
+  or_plots = plot_OR(glm_object, df_heart, var_name=name, 
+                     color_filling=c("#CC6666", "#9999CC","#66CC99","#FF6600"))
+  
+  # Plot both graphs together
+  plot_list[[name]] = customized_plots(or_plots)
+}
+
+# Plot all graphs in one matrix
+plot_grob = arrangeGrob(grobs=plot_list)
+grid.arrange(plot_grob)
+```
+
+From the plots above, we can make two counter-intuitive observations:
+
+1. *Chance of Heart Attack decreases as Cholesterol level increases.* Here we want to refer to medical studies that show that *Low-Density Lipoprotein* (LDL) and *High-Density Lipoprotein* (HDL) types of cholesterol have different impact on cardiovascular system. The former is considered to be a strong risk factor for heart attacks, while the latter does not have significant association with artery diseases [@gordon1989high] [@ldl_hdl]. Unfortunately, we do not know what kind of Cholesterol was measured for this dataset. From the observation above we can assume that it might be the HDL cholesterol.
+
+2. *Chance of Heart Attack decreases as Resting Blood Pressure increases.* To address this observation, we built a density plot of distribution of Resting Blood Pressure values factorized by the target variable below.
+
+```{r, fig.height=4, fig.width=6}
+# Plot Density plot for resting_blood_presure var
+ggplot(df_heart, aes(resting_blood_presure, colour=output, group=output)) + 
+  geom_density() +
+  labs(title=paste("Resting Blood Pressure factorized by Output variable"), 
+       x="Resting Blood Pressure")
+```
+
+From the plot above we can see that distribution of Resting Blood Pressure values are similar for both output classes. Also, both `resting_blood_presure` and `cholesterol` are not significant in the GLM model above.
+
+
+## References
+
